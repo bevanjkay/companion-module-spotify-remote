@@ -277,7 +277,7 @@ export function GetActionsList(executeAction: (fcn: DoAction) => Promise<void>):
 		[ActionId.PlaySpecificTracks]: {
 			name: 'Start Specific Track(s)',
 			description:
-				'Starts the first track within its album and queues any others. Once they finish, playback continues with the rest of that album.',
+				"On Spotify's web player, plays the tracks and then stops. On other devices, including the desktop app, starts the first track within its album and queues any others, so playback continues with the rest of that album.",
 			options: [
 				{
 					id: 'tracks',

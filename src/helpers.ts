@@ -11,10 +11,11 @@ import {
 	skipToNext,
 	skipToPrevious,
 	transferMyPlayback,
+	type PlayOptions,
 } from './api/playback.js'
 import { getTrack } from './api/track.js'
 import { SpotifyInstanceBase } from './types.js'
-import { formatApiError } from './api/util.js'
+import { formatApiError, type RequestOptionsBase } from './api/util.js'
 
 // Limit the number of retries that we do
 const MAX_ATTEMPTS = 5
@@ -340,6 +341,37 @@ export async function PlaySpecificList(
 	}
 }
 
+/**
+ * Spotify's desktop app (1.3.x, since September 2026) answers a play request that only carries `uris`
+ * with a 204, then plays nothing and empties the player. The web player still handles it, and stops
+ * after the last track, so it keeps that request. Every other device starts the first track inside
+ * its album with the rest queued behind it, as requests with a context still play.
+ */
+async function buildPlayTracksRequest(
+	reqOptions: RequestOptionsBase,
+	deviceId: string,
+	uris: string[],
+	positionMs: number,
+): Promise<{ options: PlayOptions; queue: string[] }> {
+	const devices = await getMyDevices(reqOptions)
+	const device = devices.body?.devices.find((dev) => dev.id === deviceId)
+	// The web player registers as "Web Player (<browser>)"; the desktop app uses the computer's name
+	if (device?.name.startsWith('Web Player')) {
+		return { options: { deviceId, uris, position_ms: positionMs }, queue: [] }
+	}
+
+	const [firstUri, ...queue] = uris
+	// `from_token` resolves the track as relinked for the user's market, so the album matches
+	const track = await getTrack(reqOptions, firstUri.slice(firstUri.lastIndexOf(':') + 1), { market: 'from_token' })
+	const albumUri = track.body?.album?.uri
+	if (!track.body || !albumUri) throw new Error(`Unable to find the album for ${firstUri}`)
+
+	return {
+		options: { deviceId, context_uri: albumUri, offset: { uri: track.body.uri }, position_ms: positionMs },
+		queue,
+	}
+}
+
 export async function PlaySpecificTracks(
 	instance: SpotifyInstanceBase,
 	deviceId: string,
@@ -353,32 +385,19 @@ export async function PlaySpecificTracks(
 ): Promise<void> {
 	const reqOptions = instance.getRequestOptionsBase()
 	if (!reqOptions) return
-
-	const [firstUri, ...queuedUris] = uris
-	if (!firstUri) return
+	if (uris.length === 0) return
 
 	try {
-		// Spotify's desktop app (1.3.x, since September 2026) answers a play request that only carries
-		// `uris` with a 204, then plays nothing and empties the player. Requests with a context still
-		// play, so start the first track inside its album and queue the rest behind it.
-		// `from_token` resolves the track as relinked for the user's market, so the album matches.
-		const track = await getTrack(reqOptions, firstUri.slice(firstUri.lastIndexOf(':') + 1), { market: 'from_token' })
-		const albumUri = track.body?.album?.uri
-		if (!track.body || !albumUri) throw new Error(`Unable to find the album for ${firstUri}`)
+		const request = await buildPlayTracksRequest(reqOptions, deviceId, uris, positionMs)
 
 		if (fadeIn) {
 			await ChangeVolume(instance, deviceId, true, Number(startVolume))
 			await GetCurrentVolume(instance, deviceId)
 		}
 
-		await play(reqOptions, {
-			deviceId: deviceId,
-			context_uri: albumUri,
-			offset: { uri: track.body.uri },
-			position_ms: positionMs,
-		})
+		await play(reqOptions, request.options)
 
-		for (const uri of queuedUris) {
+		for (const uri of request.queue) {
 			await QueueItem(instance, deviceId, uri)
 		}
 
